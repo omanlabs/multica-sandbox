@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { loadTasks, saveTasks } from './storage'
 import { STATUSES, STATUS_LABELS, type Status, type Task } from './types'
 
@@ -35,6 +35,18 @@ const COLUMN_STYLE: Record<Status, ColumnStyle> = {
 const FOCUS_RING =
   'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900'
 
+/** card-level control tone; `disabled:` variants below always win on specificity */
+const ICON_BUTTON_TONE = {
+  neutral:
+    'border-slate-300 bg-white text-slate-700 hover:border-slate-400 hover:bg-slate-50 hover:text-slate-900',
+  danger:
+    'border-slate-300 bg-white text-slate-700 hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700',
+  primary: 'border-slate-900 bg-slate-900 text-white hover:border-slate-700 hover:bg-slate-700',
+  destructive: 'border-rose-700 bg-rose-700 text-white hover:border-rose-600 hover:bg-rose-600',
+} as const
+
+type IconButtonTone = keyof typeof ICON_BUTTON_TONE
+
 function relativeAge(createdAt: number): string {
   const seconds = Math.max(0, Math.round((Date.now() - createdAt) / 1000))
   if (seconds < 60) return 'just now'
@@ -62,6 +74,78 @@ function ChevronIcon({ direction }: { direction: -1 | 1 }) {
   )
 }
 
+function PencilIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="size-3.5"
+    >
+      <path d="M13.2 3.3a1.6 1.6 0 0 1 2.3 2.3L7 14.1l-3 .9.9-3 8.3-8.7Z" />
+      <path d="M12.2 4.3 14.5 6.6" />
+    </svg>
+  )
+}
+
+function TrashIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="size-3.5"
+    >
+      <path d="M4 6h12" />
+      <path d="M8 3.5h4" />
+      <path d="M6.5 6l.6 9a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-9" />
+      <path d="M9 9v4.5M11 9v4.5" />
+    </svg>
+  )
+}
+
+function CheckIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="size-3.5"
+    >
+      <path d="M4.5 10.5 8 14l7.5-8" />
+    </svg>
+  )
+}
+
+function CloseIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="size-3.5"
+    >
+      <path d="M5.5 5.5l9 9M14.5 5.5l-9 9" />
+    </svg>
+  )
+}
+
 function TrayIcon() {
   return (
     <svg
@@ -80,68 +164,206 @@ function TrayIcon() {
   )
 }
 
-function MoveButton({
-  direction,
+function IconButton({
   label,
-  disabled,
+  children,
   onClick,
+  tone = 'neutral',
+  type = 'button',
+  disabled = false,
+  describedBy,
+  ref,
 }: {
-  direction: -1 | 1
   label: string
-  disabled: boolean
-  onClick: () => void
+  children: React.ReactNode
+  onClick?: () => void
+  tone?: IconButtonTone
+  type?: 'button' | 'submit'
+  disabled?: boolean
+  /** id of the text that explains what this control is for, read after its label */
+  describedBy?: string
+  ref?: React.Ref<HTMLButtonElement>
 }) {
   return (
     <button
-      type="button"
+      ref={ref}
+      type={type}
       onClick={onClick}
       disabled={disabled}
       aria-label={label}
-      className={`inline-flex size-7 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-700 transition-colors hover:border-slate-400 hover:bg-slate-50 hover:text-slate-900 disabled:border-slate-300 disabled:bg-slate-200 disabled:text-slate-500 disabled:hover:bg-slate-200 disabled:hover:text-slate-500 ${FOCUS_RING}`}
+      aria-describedby={describedBy}
+      className={`inline-flex size-7 shrink-0 items-center justify-center rounded-md border transition-colors disabled:border-slate-300 disabled:bg-slate-200 disabled:text-slate-500 disabled:hover:border-slate-300 disabled:hover:bg-slate-200 disabled:hover:text-slate-500 ${ICON_BUTTON_TONE[tone]} ${FOCUS_RING}`}
     >
-      <ChevronIcon direction={direction} />
+      {children}
     </button>
   )
 }
 
+/** a card is either read-only, being retitled, or awaiting delete confirmation */
+type CardMode = { kind: 'view' } | { kind: 'edit'; draft: string } | { kind: 'confirmDelete' }
+
 function TaskCard({
   task,
   onMove,
+  onRename,
+  onDelete,
 }: {
   task: Task
   onMove: (direction: -1 | 1) => void
+  onRename: (title: string) => void
+  onDelete: () => void
 }) {
+  const [mode, setMode] = useState<CardMode>({ kind: 'view' })
+  const renameRef = useRef<HTMLButtonElement | null>(null)
+  const deleteRef = useRef<HTMLButtonElement | null>(null)
+  const keepRef = useRef<HTMLButtonElement | null>(null)
+  const confirmId = useId()
+  /** the trigger that regains focus when a mode closes, so keyboard users keep their place */
+  const returnFocusTo = useRef<'rename' | 'delete' | null>(null)
   const index = STATUSES.indexOf(task.status)
   const previous = STATUSES[index - 1]
   const next = STATUSES[index + 1]
+  const draft = mode.kind === 'edit' ? mode.draft : ''
+
+  // every mode swap replaces the controls under the pointer/caret, so move focus with it
+  useEffect(() => {
+    if (mode.kind === 'confirmDelete') {
+      keepRef.current?.focus()
+      return
+    }
+    if (mode.kind !== 'view') return
+    const target = returnFocusTo.current
+    returnFocusTo.current = null
+    if (target === 'rename') renameRef.current?.focus()
+    else if (target === 'delete') deleteRef.current?.focus()
+  }, [mode])
+
+  function closeMode() {
+    returnFocusTo.current = mode.kind === 'edit' ? 'rename' : 'delete'
+    setMode({ kind: 'view' })
+  }
+
+  function submitRename(event: React.FormEvent) {
+    event.preventDefault()
+    const trimmed = draft.trim()
+    if (trimmed.length === 0) return
+    if (trimmed !== task.title) onRename(trimmed)
+    closeMode()
+  }
 
   return (
-    <li className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm transition-shadow hover:border-slate-300 hover:shadow-md">
-      <p className="text-sm leading-snug font-medium text-slate-900">{task.title}</p>
-      <div className="mt-3 flex items-center justify-between gap-2">
-        <span className="text-xs text-slate-500">Added {relativeAge(task.createdAt)}</span>
-        <div className="flex gap-1">
-          <MoveButton
-            direction={-1}
-            disabled={previous === undefined}
-            onClick={() => onMove(-1)}
-            label={
-              previous === undefined
-                ? `“${task.title}” is already in ${STATUS_LABELS[task.status]}`
-                : `Move “${task.title}” back to ${STATUS_LABELS[previous]}`
-            }
+    <li
+      onKeyDown={(event) => {
+        // Escape leaves whichever mode is open; the destructive one needs it most
+        if (event.key !== 'Escape' || mode.kind === 'view') return
+        closeMode()
+      }}
+      className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm transition-shadow hover:border-slate-300 hover:shadow-md"
+    >
+      {mode.kind === 'edit' ? (
+        <form onSubmit={submitRename} className="flex items-center gap-2">
+          <input
+            autoFocus
+            value={draft}
+            onChange={(event) => setMode({ kind: 'edit', draft: event.target.value })}
+            aria-label={`Edit title of “${task.title}”`}
+            className={`min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-2 py-1 text-sm leading-snug text-slate-900 focus-visible:border-slate-900 ${FOCUS_RING}`}
           />
-          <MoveButton
-            direction={1}
-            disabled={next === undefined}
-            onClick={() => onMove(1)}
+          <IconButton
+            type="submit"
+            tone="primary"
+            disabled={draft.trim().length === 0}
             label={
-              next === undefined
-                ? `“${task.title}” is already in ${STATUS_LABELS[task.status]}`
-                : `Move “${task.title}” forward to ${STATUS_LABELS[next]}`
+              draft.trim().length === 0
+                ? `Enter a title for “${task.title}”`
+                : `Save new title for “${task.title}”`
             }
-          />
-        </div>
+          >
+            <CheckIcon />
+          </IconButton>
+          <IconButton onClick={closeMode} label={`Cancel renaming “${task.title}”`}>
+            <CloseIcon />
+          </IconButton>
+        </form>
+      ) : (
+        <p className="text-sm leading-snug font-medium text-slate-900">{task.title}</p>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+        {mode.kind === 'confirmDelete' ? (
+          <>
+            <span id={confirmId} className="text-xs font-medium text-rose-700">
+              Delete this task?
+            </span>
+            <div className="flex gap-1">
+              <IconButton
+                tone="destructive"
+                onClick={onDelete}
+                describedBy={confirmId}
+                label={`Confirm deleting “${task.title}”`}
+              >
+                <TrashIcon />
+              </IconButton>
+              {/* focus lands here on entry: the safe choice, not the destructive one */}
+              <IconButton
+                ref={keepRef}
+                onClick={closeMode}
+                describedBy={confirmId}
+                label={`Keep “${task.title}”`}
+              >
+                <CloseIcon />
+              </IconButton>
+            </div>
+          </>
+        ) : (
+          <>
+            <span className="text-xs text-slate-500">Added {relativeAge(task.createdAt)}</span>
+            {/* an open draft leaves only Save/Cancel: moving the card re-parents the <li>,
+                which remounts this component and would drop the draft — same reason
+                confirmDelete hides these controls instead of leaving them live */}
+            {mode.kind === 'view' && (
+              <div className="flex gap-1">
+                <IconButton
+                  disabled={previous === undefined}
+                  onClick={() => onMove(-1)}
+                  label={
+                    previous === undefined
+                      ? `“${task.title}” is already in ${STATUS_LABELS[task.status]}`
+                      : `Move “${task.title}” back to ${STATUS_LABELS[previous]}`
+                  }
+                >
+                  <ChevronIcon direction={-1} />
+                </IconButton>
+                <IconButton
+                  disabled={next === undefined}
+                  onClick={() => onMove(1)}
+                  label={
+                    next === undefined
+                      ? `“${task.title}” is already in ${STATUS_LABELS[task.status]}`
+                      : `Move “${task.title}” forward to ${STATUS_LABELS[next]}`
+                  }
+                >
+                  <ChevronIcon direction={1} />
+                </IconButton>
+                <IconButton
+                  ref={renameRef}
+                  onClick={() => setMode({ kind: 'edit', draft: task.title })}
+                  label={`Rename “${task.title}”`}
+                >
+                  <PencilIcon />
+                </IconButton>
+                <IconButton
+                  ref={deleteRef}
+                  tone="danger"
+                  onClick={() => setMode({ kind: 'confirmDelete' })}
+                  label={`Delete “${task.title}”`}
+                >
+                  <TrashIcon />
+                </IconButton>
+              </div>
+            )}
+          </>
+        )}
       </div>
     </li>
   )
@@ -185,6 +407,16 @@ export default function App() {
         return { ...task, status: STATUSES[clamped] }
       }),
     )
+  }
+
+  function renameTask(id: string, nextTitle: string) {
+    setTasks((current) =>
+      current.map((task) => (task.id === id ? { ...task, title: nextTitle } : task)),
+    )
+  }
+
+  function deleteTask(id: string) {
+    setTasks((current) => current.filter((task) => task.id !== id))
   }
 
   const doneCount = tasks.filter((task) => task.status === 'done').length
@@ -256,6 +488,8 @@ export default function App() {
                       key={task.id}
                       task={task}
                       onMove={(direction) => moveTask(task.id, direction)}
+                      onRename={(nextTitle) => renameTask(task.id, nextTitle)}
+                      onDelete={() => deleteTask(task.id)}
                     />
                   ))}
                   {column.length === 0 && <EmptyColumn style={style} />}
