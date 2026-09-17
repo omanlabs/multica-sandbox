@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { loadTasks, saveTasks } from './storage'
 import { STATUSES, STATUS_LABELS, type Status, type Task } from './types'
 
@@ -171,6 +171,7 @@ function IconButton({
   tone = 'neutral',
   type = 'button',
   disabled = false,
+  ref,
 }: {
   label: string
   children: React.ReactNode
@@ -178,9 +179,11 @@ function IconButton({
   tone?: IconButtonTone
   type?: 'button' | 'submit'
   disabled?: boolean
+  ref?: React.Ref<HTMLButtonElement>
 }) {
   return (
     <button
+      ref={ref}
       type={type}
       onClick={onClick}
       disabled={disabled}
@@ -207,17 +210,40 @@ function TaskCard({
   onDelete: () => void
 }) {
   const [mode, setMode] = useState<CardMode>({ kind: 'view' })
+  const renameRef = useRef<HTMLButtonElement | null>(null)
+  const deleteRef = useRef<HTMLButtonElement | null>(null)
+  const keepRef = useRef<HTMLButtonElement | null>(null)
+  /** the trigger that regains focus when a mode closes, so keyboard users keep their place */
+  const returnFocusTo = useRef<'rename' | 'delete' | null>(null)
   const index = STATUSES.indexOf(task.status)
   const previous = STATUSES[index - 1]
   const next = STATUSES[index + 1]
   const draft = mode.kind === 'edit' ? mode.draft : ''
+
+  // every mode swap replaces the controls under the pointer/caret, so move focus with it
+  useEffect(() => {
+    if (mode.kind === 'confirmDelete') {
+      keepRef.current?.focus()
+      return
+    }
+    if (mode.kind !== 'view') return
+    const target = returnFocusTo.current
+    returnFocusTo.current = null
+    if (target === 'rename') renameRef.current?.focus()
+    else if (target === 'delete') deleteRef.current?.focus()
+  }, [mode])
+
+  function closeMode() {
+    returnFocusTo.current = mode.kind === 'edit' ? 'rename' : 'delete'
+    setMode({ kind: 'view' })
+  }
 
   function submitRename(event: React.FormEvent) {
     event.preventDefault()
     const trimmed = draft.trim()
     if (trimmed.length === 0) return
     if (trimmed !== task.title) onRename(trimmed)
-    setMode({ kind: 'view' })
+    closeMode()
   }
 
   return (
@@ -229,7 +255,7 @@ function TaskCard({
             value={draft}
             onChange={(event) => setMode({ kind: 'edit', draft: event.target.value })}
             onKeyDown={(event) => {
-              if (event.key === 'Escape') setMode({ kind: 'view' })
+              if (event.key === 'Escape') closeMode()
             }}
             aria-label={`Edit title of “${task.title}”`}
             className={`min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-2 py-1 text-sm leading-snug text-slate-900 focus-visible:border-slate-900 ${FOCUS_RING}`}
@@ -246,10 +272,7 @@ function TaskCard({
           >
             <CheckIcon />
           </IconButton>
-          <IconButton
-            onClick={() => setMode({ kind: 'view' })}
-            label={`Cancel renaming “${task.title}”`}
-          >
+          <IconButton onClick={closeMode} label={`Cancel renaming “${task.title}”`}>
             <CloseIcon />
           </IconButton>
         </form>
@@ -269,7 +292,8 @@ function TaskCard({
               >
                 <TrashIcon />
               </IconButton>
-              <IconButton onClick={() => setMode({ kind: 'view' })} label={`Keep “${task.title}”`}>
+              {/* focus lands here on entry: the safe choice, not the destructive one */}
+              <IconButton ref={keepRef} onClick={closeMode} label={`Keep “${task.title}”`}>
                 <CloseIcon />
               </IconButton>
             </div>
@@ -303,12 +327,14 @@ function TaskCard({
               {mode.kind === 'view' && (
                 <>
                   <IconButton
+                    ref={renameRef}
                     onClick={() => setMode({ kind: 'edit', draft: task.title })}
                     label={`Rename “${task.title}”`}
                   >
                     <PencilIcon />
                   </IconButton>
                   <IconButton
+                    ref={deleteRef}
                     tone="danger"
                     onClick={() => setMode({ kind: 'confirmDelete' })}
                     label={`Delete “${task.title}”`}
